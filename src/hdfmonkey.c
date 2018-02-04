@@ -650,6 +650,115 @@ static int cmd_create(int argc, char *argv[]) {
 	return 0;
 }
 
+static void bytes_to_human(DWORD bytes, float *human, char **unit) {
+	if (bytes >= 0x40000000) {
+		*human = bytes / (float)0x40000000;
+		*unit = "GiB";
+	}
+	else if (bytes >= 0x100000) {
+		*human = bytes / (float)0x100000;
+		*unit = "MiB";
+	}
+	else if (bytes >= 0x400) {
+		*human = bytes / (float)0x400;
+		*unit = "KiB";
+	}
+	else {
+		*human = bytes;
+		*unit = "bytes";
+	}
+}
+
+static int cmd_info(int argc, char *argv[]) {
+	char *image_filename;
+	char *str_fmt;
+	char *sz_unit;
+	volume_container vol;
+	FATFS fatfs, *fatfs2;
+	FRESULT result;
+	float sz_human;
+	DWORD sz_disk;
+	DWORD free_clust, free_sect, tot_sect, start, end;
+	WORD ss;
+	int i;
+
+	if (argc < 3) {
+		printf("No image filename supplied\n");
+		return -1;
+	}
+	image_filename = argv[2];
+
+	if (open_image(image_filename, &vol, &fatfs, 1) == -1) {
+		return -1;
+	}
+
+	if (disk_ioctl(0, GET_SECTOR_COUNT, &sz_disk) != RES_OK ) {
+		return -1;
+	}
+
+	if (disk_ioctl(0, GET_SECTOR_SIZE, &ss) != RES_OK ) {
+		return -1;
+	}
+
+	/* Force sync to get volume information and free clusters */
+	result = f_getfree("/", &free_clust, &fatfs2);
+	if (result != FR_OK) {
+		fat_perror("Error getting free clusters", result);
+		return -1;
+	}
+
+	bytes_to_human(sz_disk * ss, &sz_human, &sz_unit);
+	printf("Disk: %.1f %s, %lu bytes, %lu sectors\n", sz_human, sz_unit,
+		sz_disk * ss, sz_disk);
+	printf("Sector size: %u bytes\n", ss);
+
+	/* Print partition info */
+	switch (fatfs.fs_type) {
+		case FS_FAT12: str_fmt = "FAT12"; break;
+		case FS_FAT16: str_fmt = "FAT16"; break;
+		case FS_FAT32: str_fmt = "FAT32"; break;
+		default: str_fmt = "UNKNOWN"; break;
+	}
+	printf("\nDrive %d, filesystem %s\n", fatfs.drive, str_fmt);
+	printf("Cluster size: %d * %d = %d bytes\n", fatfs.csize, ss,
+		fatfs.csize * ss);
+
+	/* Print the free space */
+	tot_sect = (fatfs.max_clust - 2) * fatfs.csize;
+	free_sect = free_clust * fatfs.csize;
+	printf("Free space: %lu/%lu clusters, %lu/%lu sectors, ",
+		free_clust, (fatfs.max_clust - 2), free_sect, tot_sect);
+	bytes_to_human(free_sect * ss, &sz_human, &sz_unit);
+	printf("%.1f %s", sz_human, sz_unit);
+	bytes_to_human(free_sect * ss, &sz_human, &sz_unit);
+	printf("/%.1f %s\n", sz_human, sz_unit);
+
+	/* Print partition details */
+	printf("\nArea        Start      End  Sectors\n");
+
+	if (fatfs.fatbase > 0) {
+		printf("reserved %8d %8lu %8lu\n", 0, fatfs.fatbase - 1, fatfs.fatbase);
+	}
+
+	for (i=1; i<=fatfs.n_fats; i++) {
+		start = fatfs.fatbase + (i-1) * fatfs.sects_fat;
+		end = fatfs.fatbase + ( i * fatfs.sects_fat ) - 1;
+		printf("FAT %d    %8lu %8lu %8lu\n", i, start, end, end - start + 1);
+	}
+
+	if (fatfs.fs_type != FS_FAT32) {
+		start = fatfs.dirbase;
+		end = fatfs.database - 1;
+		printf("root dir %8lu %8lu %8lu\n", start, end, end - start + 1);
+	}
+
+	start = fatfs.database;
+	end = sz_disk - 1;
+	printf("data     %8lu %8lu %8lu\n\n", start, end, end - start + 1);
+
+	return 0;
+}
+
 static int cmd_mkdir(int argc, char *argv[]) {
 	char *image_filename;
 	char *dir_name;
@@ -914,7 +1023,7 @@ static int cmd_help(int argc, char *argv[]) {
 		printf("usage: hdfmonkey <command> [args]\n\n");
 		printf("Type 'hdfmonkey help <command>' for help on a specific command.\n");
 		printf("Available commands:\n");
-		printf("\tclone\n\tcreate\n\tformat\n\tget\n\thelp\n\tls\n\tmkdir\n\tput\n\trebuild\n\trm\n");
+		printf("\tclone\n\tcreate\n\tformat\n\tget\n\thelp\n\tinfo\n\tls\n\tmkdir\n\tput\n\trebuild\n\trm\n");
 	} else if (strcmp(argv[2], "clone") == 0) {
 		printf("clone: Make a new image file from a disk or image, possibly in a different container format\n");
 		printf("usage: hdfmonkey clone <oldimagefile> <newimagefile>\n");
@@ -933,6 +1042,9 @@ static int cmd_help(int argc, char *argv[]) {
 	} else if (strcmp(argv[2], "help") == 0) {
 		printf("help: Describe the usage of this program or its commands.\n");
 		printf("usage: hdfmonkey help [command]\n");
+	} else if (strcmp(argv[2], "info") == 0) {
+		printf("info: Show info about the disk image and the filesystem\n");
+		printf("usage: hdfmonkey info <imagefile>\n");
 	} else if (strcmp(argv[2], "ls") == 0) {
 		printf("ls: Show a directory listing\n");
 		printf("usage: hdfmonkey ls <imagefile> [path]\n");
@@ -969,6 +1081,8 @@ int main(int argc, char *argv[]) {
 		return cmd_get(argc, argv);
 	} else if (strcmp(argv[1], "help") == 0) {
 		return cmd_help(argc, argv);
+	} else if (strcmp(argv[1], "info") == 0) {
+		return cmd_info(argc, argv);
 	} else if (strcmp(argv[1], "ls") == 0) {
 		return cmd_ls(argc, argv);
 	} else if (strcmp(argv[1], "mkdir") == 0) {
